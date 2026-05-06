@@ -1,11 +1,16 @@
 from modulefinder import test
 from ntpath import isfile
 from pydoc import text
+from shutil import ExecError
+from typing import Literal
 import fitz as fz
 from PIL import Image
 from pathlib import Path
 import base64
 from io import BytesIO
+
+# import custom exceptions
+from custom_exceptions import IncompatibleFileFormatException, EmptyFileExtensionException, ImageEncodingException
 
 # when a user upload an image file, it most probably will be in one of these formats
 raster_formats = {
@@ -22,6 +27,58 @@ raster_formats = {
 file_formats = {
     ".pdf", ".txt"
 }
+
+def get_file_extension(file_path: Path) -> str:
+    """Extracts file suffix (extension) and returns it as a string. Raises EmptyFileExtensionException if no extension found
+
+    Args:
+        file_path (Path): A Path object to the file
+
+    Returns:
+        str: Returns the extension (e.g. .png) as a string
+    """
+
+    extension = file_path.suffix.lower()
+    print(f"Extension of {file_path} is {extension}")
+
+    if extension == '' or not extension:
+        raise EmptyFileExtensionException(message=f"{file_path} does not have an extension; cannot proceed with further validation\n")
+    
+    return extension
+
+
+def normalize_file_path(file_path: str) -> tuple[Path, str]:
+    """Normalizes the provided path after validation and returns a Path object for further I/O operations
+
+    Args:
+        file_path (str): The file path to the document that needs to be processed
+
+    Returns:
+        tuple[Path, str]: A Path object of the file location and the extension of the file
+    """
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Cannot find the path specified: {file_path}")
+    
+    if not file_path.is_file():
+        raise IsADirectoryError(f"Expected a file, but found a directory: {file_path}")
+    
+
+    try:
+        extension = get_file_extension(file_path=file_path)
+        return (file_path, extension)
+    except Exception:
+        print(f"Exception occurred while retrieving file extension")
+
+def classify_file_type(extension: str) -> Literal["raster", "pdf", "txt"]:
+    """Classifies the file for further processing and extraction
+    """
+    if extension in raster_formats:
+        return "raster"
+    elif extension in file_formats:
+        return extension
+    else:
+        raise IncompatibleFileFormatException(message=f"{extension} is not a supported file type\n")
 
 def document_validator(file_path: str) -> tuple[str, bool, str]:
     """Reads a document and returns whether it is a document or an image
@@ -49,19 +106,15 @@ def document_validator(file_path: str) -> tuple[str, bool, str]:
         str: The type of file that was uploaded (raster, document). Returns None when incompatible file format uploaded 
     """
 
-    file_path = Path(file_path)
-    extension = file_path.suffix.lower()
+    normalized_file_path = normalize_file_path(file_path)
+    file_path = normalize_file_path[0]
+    extension = normalize_file_path[1]
+
     print(f"Extension of {file_path} is {extension}")
 
-    if extension in raster_formats:
-        print(f"File {file_path} is a raster format\n")
-        return (file_path, True, "raster")
-    elif extension in file_formats:
-        print(f"File {file_path} is a file format, extension: {extension}\n")
-        return (file_path, True, "document")
-    else:
-        print(f"File {file_path} is not a compatible format\n")
-        return (None, False, None)
+    file_type = classify_file_type(extension)
+
+    return [file_path, , file_type]
 
 
 def extraction_branching(validated_file_tuple: tuple):
@@ -178,8 +231,7 @@ def image_encoder(file_path_to_image: str) -> str:
                 image_b64_encodedString =  base64.b64encode(image.read()).decode()
                 return image_b64_encodedString
             except Exception as err:
-                print(f"Exception occurred while trying to encode the image: {err.with_traceback()}\n")
-                return None
+                raise ImageEncodingException(message=f"Exception occurred while trying to encode the image: {err.with_traceback()}\n")
     else:
         print(f"{file_path_to_image} is invalid; not found\n")
         return None
