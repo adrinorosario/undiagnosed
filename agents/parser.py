@@ -1,5 +1,6 @@
 from modulefinder import test
 from ntpath import isfile
+from pydoc import text
 import fitz as fz
 from PIL import Image
 from pathlib import Path
@@ -90,44 +91,46 @@ def extraction_branching(validated_file_tuple: tuple):
             document = fz.open(filename=Path(file_path))
 
             """How the document will be flagged as scanned or not:
-                - get the total count of document fonts
-                - get the total count of XObjects in the document
+                - get the total count of page fonts
+                - get the total count of XObjects in the page
                 - check the number of pages where images take up more area
                 - check the number of drawings and tables
 
                 conditional logic for classification:
                     -> if the number of fonts > XObjects:
                         if the number of pages where images take up more area is lesser than half:
-                            * document gets flagged as text and can be used for text extraction
+                            * page gets flagged as text and can be used for text extraction
                     -> else:
                         if the number of pages where images take up more area is more than half the count of pages:
                             if the number of drawings and images > 0:
-                                * document is flagged as scanned and needs to go for visual extraction
+                                * page is flagged as scanned and needs to go for visual extraction
+                
+                We are performing page level classification and not on the entire document
             """
 
-            # store the fonts, XObjects, and the text from the document
-            document_fonts = set()
-            document_xobjects = set()
-            document_text = ""
-            document_drawings, document_images = 0, 0
-
-            # track the pages where images take up more area
-            image_dominant_pages = 0
+            # track the pages flagged for text extraction
+            text_extraction_flagged_page_count = []
 
             for page in document:
-                document_text += " " + page.get_text()
+                # store the fonts, XObjects, and the text from the page
+                page_fonts = set()
+                page_xobjects = set()
+                page_character_count = 0
+                page_drawings, total_page_images = 0, 0
+
+                page_character_count = len(page.get_text()) # get the number of characters in the page
 
                 # retrieve the fonts and XObjects and add them to the respective sets
                 for font in page.get_fonts():
-                    document_fonts.add(font[0])
+                    page_fonts.add(font[0])
                 for xobject in page.get_xobjects():
-                    document_xobjects.add(xobject[0])
+                    page_xobjects.add(xobject[0])
                 
 
                 # get the number of images and drawings
                 page_images = page.get_images()
-                document_images += len(page_images)
-                document_drawings += len(page.get_drawings())
+                total_page_images += len(page_images)
+                page_drawings += len(page.get_drawings())
 
                 # check the area occupied by images in a page compared to text
                 page_area = abs(page.rect)
@@ -141,15 +144,16 @@ def extraction_branching(validated_file_tuple: tuple):
                     except Exception:
                         continue
                 
-                if is_page_image_dominant:
-                    image_dominant_pages += 1
-                    
+                if page_character_count > 150 and len(page_fonts) > 0:
+                    text_extraction_flagged_page_count.append(True)
+                elif page_character_count < 50 or is_page_image_dominant or len(page_xobjects) >= len(page_fonts):
+                    text_extraction_flagged_page_count.append(False)
+                else:
+                    text_extraction_flagged_page_count.append(False)
                 
-            print(f"Total number of fonts found: {len(document_fonts)}")
-            print(f"Total number of XObjects found: {len(document_xobjects)}")
-            print(f"Total number of drawings: {document_drawings}")
-            print(f"Total number of images: {document_images}")
-            print(f"Number of image dominant pages: {image_dominant_pages} / {document.page_count}\n")
+
+            print(f"Number of pages flagged for text extraction: {len([page for page in text_extraction_flagged_page_count if page == True])}")
+            print(f"Number of pages flagged for vision extraction: {len([page for page in text_extraction_flagged_page_count if page == False])}")
 
 
     elif validated_file_tuple[1] == False:
@@ -196,6 +200,7 @@ def main():
 
             # pass the validation tuple to the extractor branching function
             extraction_branching(validation_tuple)
+            print("-------\n")
 
 if __name__ == "__main__":
     main()
