@@ -1,13 +1,14 @@
-from modulefinder import test
-from ntpath import isfile
-from pydoc import text
-from shutil import ExecError
 from typing import Literal
 import fitz as fz
-from PIL import Image
 from pathlib import Path
 import base64
-from io import BytesIO
+import logging
+
+# Configure module-level logger (adjust level as needed)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# cSpell:ignore xobjects xobject  # technical PDF term used in PyMuPDF
 
 # import custom exceptions
 from custom_exceptions import IncompatibleFileFormatException, EmptyFileExtensionException, ImageEncodingException
@@ -39,7 +40,8 @@ def get_file_extension(file_path: Path) -> str:
     """
 
     extension = file_path.suffix.lower()
-    print(f"Extension of {file_path} is {extension}")
+    # [CHANGED] Replaced print with logger for better observability
+    logger.info(f"Extension of {file_path} is {extension}")
 
     if extension == '' or not extension:
         raise EmptyFileExtensionException(message=f"{file_path} does not have an extension; cannot proceed with further validation\n")
@@ -67,16 +69,19 @@ def normalize_file_path(file_path: str) -> tuple[Path, str]:
     try:
         extension = get_file_extension(file_path=file_path)
         return (file_path, extension)
-    except Exception:
-        print(f"Exception occurred while retrieving file extension")
+    except Exception as e:
+        # Re-raise to let caller handle; preserves context for debugging
+        raise IncompatibleFileFormatException(
+            message=f"Failed to normalize file path {file_path}: {e}"
+        ) from e
 
-def classify_file_type(extension: str) -> Literal["raster", "pdf", "txt"]:
+def classify_file_type(extension: str) -> Literal["raster", "document"]:
     """Classifies the file for further processing and extraction
     """
     if extension in raster_formats:
         return "raster"
     elif extension in file_formats:
-        return extension
+        return "document"
     else:
         raise IncompatibleFileFormatException(message=f"{extension} is not a supported file type\n")
 
@@ -107,14 +112,16 @@ def document_validator(file_path: str) -> tuple[str, bool, str]:
     """
 
     normalized_file_path = normalize_file_path(file_path)
-    file_path = normalize_file_path[0]
-    extension = normalize_file_path[1]
+    file_path = normalized_file_path[0]
+    extension = normalized_file_path[1]
 
-    print(f"Extension of {file_path} is {extension}")
+    # [CHANGED] Use logger instead of print
+    # logger.info(f"Extension of {file_path} is {extension}")
 
     file_type = classify_file_type(extension)
 
-    return [file_path, , file_type]
+    # [CHANGED] Return as tuple for consistency with docstring
+    return (file_path, True, file_type)
 
 
 def extraction_branching(validated_file_tuple: tuple):
@@ -123,12 +130,18 @@ def extraction_branching(validated_file_tuple: tuple):
     Args:
         validated_file_tuple (tuple): The output from document_validator().
     """
+
+    # explicitly check if the file has been validated
+    if not validated_file_tuple[1]:
+        print(f"Skipping processing for invalid file: {validated_file_tuple[0]}")  # Log intentional skip
+        return
     
     if validated_file_tuple[1]:
         # the document is valid and can be further processed for extraction
         file_path = validated_file_tuple[0]
+        file_type = validated_file_tuple[2]
 
-        if validated_file_tuple[2] == "raster":
+        if file_type == "raster":
             # images need to be processed before sending into the model for extraction
 
             # encode the image and retrieve the base64 encoding
@@ -138,7 +151,7 @@ def extraction_branching(validated_file_tuple: tuple):
                 print(f"Exception occurred while calling the image_encoder() inside extraction_branching(): {image_encoding_func_call_exp.with_traceback()}\n")
                 # after this, you need to send it over to the vision-first function
 
-        elif validated_file_tuple[2] == "document":
+        elif file_type == "document":
             # documents need to be further processed for extraction
             print(f"Document: {file_path}")
             document = fz.open(filename=Path(file_path))
@@ -231,10 +244,11 @@ def image_encoder(file_path_to_image: str) -> str:
                 image_b64_encodedString =  base64.b64encode(image.read()).decode()
                 return image_b64_encodedString
             except Exception as err:
-                raise ImageEncodingException(message=f"Exception occurred while trying to encode the image: {err.with_traceback()}\n")
+                raise ImageEncodingException(
+                    message=f"Exception occurred while trying to encode the image: {err}"
+                ) from err
     else:
-        print(f"{file_path_to_image} is invalid; not found\n")
-        return None
+        raise IncompatibleFileFormatException(f"{file_path_to_image} not found") # replace this with new error type
 
 def main():
     """The main function of the Document Parser agent

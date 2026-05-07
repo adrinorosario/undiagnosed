@@ -15,8 +15,9 @@ class ImageEncodingException(Exception):
         Exception: Inheriting from the base Exception class
     """
 
-    def __init__(self, message, error_code):
+    def __init__(self, message, error_code=701):
         super().__init__(message)
+        self.message = message
         self.error_code = error_code
     
     def __str__(self):
@@ -29,9 +30,10 @@ class IncompatibleFileFormatException(Exception):
         Exception: Inheriting from the base Exception class
     """
 
-    def __init__(self, message, error_code):
+    def __init__(self, message, error_code=700):
         super().__init__(message)
-        self.error_code = 700
+        self.message = message
+        self.error_code = error_code
     
     def __str__(self):
         return f"{self.message} (Error code: {self.error_code})"
@@ -43,9 +45,10 @@ class EmptyFileExtensionException(Exception):
         Exception: Inheriting from the base Exception class
     """
 
-    def __init__(self, message, error_code):
+    def __init__(self, message, error_code=700.2):
         super().__init__(message)
-        self.error_code = 700.2
+        self.message = message
+        self.error_code = error_code
     
     def __str__(self):
         return f"{self.message} (Error code: {self.error_code})"
