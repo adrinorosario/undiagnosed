@@ -155,7 +155,8 @@ def extraction_branching(validated_file_tuple: tuple):
 
     # explicitly check if the file has been validated
     if not validated_file_tuple[1]:
-        print(f"Skipping processing for invalid file: {validated_file_tuple[0]}")  # Log intentional skip
+        logger.critical(f"Skipping processing for invalid file: {validated_file_tuple[0]}")
+        # print(f"Skipping processing for invalid file: {validated_file_tuple[0]}")  # Log intentional skip
         return
     
     if validated_file_tuple[1]:
@@ -192,7 +193,8 @@ def extraction_branching(validated_file_tuple: tuple):
 
         elif file_type == "document":
             # documents need to be further processed for extraction
-            print(f"Document: {file_path}")
+            # print(f"Document: {file_path}")
+            logger.info(f"Document: {file_path}")
             document = fz.open(filename=Path(file_path))
 
             """How the document will be flagged as scanned or not:
@@ -301,8 +303,10 @@ def extraction_branching(validated_file_tuple: tuple):
                     )
                     processed_page_data_list.append(processed_page_image_data)
 
-            print(f"Number of pages flagged for text extraction: {len([page for page in text_extraction_flagged_page_count if page == True])}")
-            print(f"Number of pages flagged for vision extraction: {len([page for page in text_extraction_flagged_page_count if page == False])}")
+            # print(f"Number of pages flagged for text extraction: {len([page for page in text_extraction_flagged_page_count if page == True])}")
+            # print(f"Number of pages flagged for vision extraction: {len([page for page in text_extraction_flagged_page_count if page == False])}")
+            logger.info(f"Number of pages flagged for text extraction: {len([page for page in text_extraction_flagged_page_count if page == True])}")
+            logger.info(f"Number of pages flagged for vision extraction: {len([page for page in text_extraction_flagged_page_count if page == False])}")
 
             processed_document =  ProcessedDocument(
                 file_path = file_path,
@@ -313,7 +317,8 @@ def extraction_branching(validated_file_tuple: tuple):
 
 
     elif validated_file_tuple[1] == False:
-        print(f"Incompatible file uploaded.\n")
+        # print(f"Incompatible file uploaded.\n")
+        logger.error(f"Incompatible file uploaded.\n")
 
 
 def image_encoder(image_bytes: bytes) -> str:
