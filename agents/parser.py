@@ -1,8 +1,11 @@
-from typing import Literal
+from dataclasses import dataclass
+from typing import Literal, dataclass_transform
 import fitz as fz
 from pathlib import Path
 import base64
 import logging
+import io
+from PIL import Image
 
 # Configure module-level logger (adjust level as needed)
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +31,25 @@ raster_formats = {
 file_formats = {
     ".pdf", ".txt"
 }
+
+# define data classes to store the contents of the processed document
+@dataclass
+class ProcessedPage:
+    page_number: int
+    extraction_method: Literal["text", "vision"]
+    raw_content: str | None # populated by the text extraction and stored as a string
+    image_b64_encoded: str | None # populated by the vision extraction which is b64 encoded
+
+@dataclass # similar data class but for raster files
+class ProcessedImage:
+    file_path: str
+    extraction_method: Literal["vision"]
+    image_b64_encoded: str | None
+@dataclass
+class ProcessedDocument:
+    file_path: str
+    total_pages: int
+    pages: list[ProcessedPage]
 
 def get_file_extension(file_path: Path) -> str:
     """Extracts file suffix (extension) and returns it as a string. Raises EmptyFileExtensionException if no extension found
@@ -144,11 +166,28 @@ def extraction_branching(validated_file_tuple: tuple):
         if file_type == "raster":
             # images need to be processed before sending into the model for extraction
 
+            image_byte_arr = io.BytesIO()
+
             # encode the image and retrieve the base64 encoding
             try:
-                base64_image_encoding = image_encoder(file_path)
+                image = Image.open(file_path)
+                # save the image bytes to the byte array
+                image.save(image_byte_arr, format='PNG')
+                retrieved_image_bytes = image_byte_arr.getvalue()
+
+                base64_image_encoding = image_encoder(retrieved_image_bytes)
+
+                processed_raster_file = ProcessedImage(
+                    file_path = file_path,
+                    extraction_method = "vision",
+                    image_b64_encoded = base64_image_encoding
+                )
+                
+                return processed_raster_file
+
             except Exception as image_encoding_func_call_exp:
-                print(f"Exception occurred while calling the image_encoder() inside extraction_branching(): {image_encoding_func_call_exp.with_traceback()}\n")
+                # print(f"Exception occurred while calling the image_encoder() inside extraction_branching(): {image_encoding_func_call_exp.with_traceback()}\n")
+                logger.error(f"Exception in image_encoder(): {image_encoding_func_call_exp}", exc_info=True)
                 # after this, you need to send it over to the vision-first function
 
         elif file_type == "document":
@@ -176,6 +215,7 @@ def extraction_branching(validated_file_tuple: tuple):
 
             # track the pages flagged for text extraction
             text_extraction_flagged_page_count = []
+            processed_page_data_list: list[ProcessedPage] = []
 
             for page in document:
                 # store the fonts, XObjects, and the text from the page
@@ -212,43 +252,92 @@ def extraction_branching(validated_file_tuple: tuple):
                 
                 if page_character_count > 150 and len(page_fonts) > 0:
                     text_extraction_flagged_page_count.append(True)
+
+                    page_text = page.get_text()
+
+                    processed_page_data = ProcessedPage(
+                        page_number = page.number,
+                        extraction_method = "text",
+                        raw_content = page_text,
+                        image_b64_encoded = None
+                    )
+                    processed_page_data_list.append(processed_page_data)
+
                 elif page_character_count < 50 or is_page_image_dominant or len(page_xobjects) >= len(page_fonts):
                     text_extraction_flagged_page_count.append(False)
+
+                    # convert the current page into an image and pass it into the b64 image encoder function
+                    page_matrix = fz.Matrix(2, 2)
+                    page_pix = page.get_pixmap(matrix=page_matrix)
+                    
+                    # retrieve the image bytes and pass it into the function
+                    page_image_bytes = page_pix.tobytes("png")
+                    b64_encoded_page_image = image_encoder(page_image_bytes)
+
+                    processed_page_image_data = ProcessedPage(
+                        page_number = page.number,
+                        extraction_method = "vision",
+                        raw_content = None,
+                        image_b64_encoded = b64_encoded_page_image
+                    )
+                    processed_page_data_list.append(processed_page_image_data)
+
                 else:
+                    logger.warning(f"Page {page.number} is ambiguous (char_count={page_character_count}, font_count={len(page_fonts)}) - routing to vision")
                     text_extraction_flagged_page_count.append(False)
-                
+                    # convert the current page into an image and pass it into the b64 image encoder function
+                    page_matrix = fz.Matrix(2, 2)
+                    page_pix = page.get_pixmap(matrix=page_matrix)
+                    
+                    # retrieve the image bytes and pass it into the function
+                    page_image_bytes = page_pix.tobytes("png")
+                    b64_encoded_page_image = image_encoder(page_image_bytes)
+
+                    processed_page_image_data = ProcessedPage(
+                        page_number = page.number,
+                        extraction_method = "vision",
+                        raw_content = None,
+                        image_b64_encoded = b64_encoded_page_image
+                    )
+                    processed_page_data_list.append(processed_page_image_data)
 
             print(f"Number of pages flagged for text extraction: {len([page for page in text_extraction_flagged_page_count if page == True])}")
             print(f"Number of pages flagged for vision extraction: {len([page for page in text_extraction_flagged_page_count if page == False])}")
+
+            processed_document =  ProcessedDocument(
+                file_path = file_path,
+                total_pages = document.page_count,
+                pages = processed_page_data_list
+            )
+            return processed_document
 
 
     elif validated_file_tuple[1] == False:
         print(f"Incompatible file uploaded.\n")
 
 
-def image_encoder(file_path_to_image: str) -> str:
-    """Encode an uploaded image or scanned document page to base64 string
+def image_encoder(image_bytes: bytes) -> str:
+    """Encode image bytes or scanned document page bytes to a base64 string.
 
     Args:
-        file_path_to_image (str): The path to the image that needs to be encoded
+        image_bytes (bytes): Raw image bytes that need to be encoded.
 
     Returns:
-        str: The resultant base64 string
+        str: The resultant base64 string.
     """
 
-    path = Path(file_path_to_image)
-    if path.exists():
-        # read the image
-        with open(path, "rb") as image:
-            try:
-                image_b64_encodedString =  base64.b64encode(image.read()).decode()
-                return image_b64_encodedString
-            except Exception as err:
-                raise ImageEncodingException(
-                    message=f"Exception occurred while trying to encode the image: {err}"
-                ) from err
-    else:
-        raise IncompatibleFileFormatException(f"{file_path_to_image} not found") # replace this with new error type
+    if not image_bytes:
+        raise ImageEncodingException(
+            message="Cannot encode empty image bytes"
+        )
+
+    try:
+        return base64.b64encode(image_bytes).decode()
+    except Exception as err:
+        raise ImageEncodingException(
+            message=f"Exception occurred while trying to encode the image bytes: {err}"
+        ) from err
+
 
 def main():
     """The main function of the Document Parser agent
@@ -265,7 +354,8 @@ def main():
             validation_tuple = document_validator(file_path)
 
             # pass the validation tuple to the extractor branching function
-            extraction_branching(validation_tuple)
+            result = extraction_branching(validation_tuple)
+            logger.info(f"Result: {result}")
             print("-------\n")
 
 if __name__ == "__main__":
