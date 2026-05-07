@@ -343,6 +343,60 @@ def image_encoder(image_bytes: bytes) -> str:
             message=f"Exception occurred while trying to encode the image bytes: {err}"
         ) from err
 
+def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedImage) -> dict:
+    """Passes the extracted data into the Gemma models and returns a dict containing clinical signals/indicators
+
+    Args:
+        processed_document (ProcessedDocument | ProcessedImage): _description_
+
+    Returns:
+        dict: A dict object (intended to be JSON) containing clinical signals
+    """
+
+    # check whether the input is an image or document list and branch accordingly
+    match processed_document:
+        case ProcessedDocument():
+            # here, each page needs to be looped over and parsed according to whether it needs an image extraction or text extraction
+            # a single prompt is leveraged for this
+            """prompt construction:
+            * have the base system prompt that instructs the model on what it needs to perform
+            * have a prompt holder -- a base str that will hold the entire prompt
+            
+            - if the page needs to a text extraction, extract text and add it to the prompt holder
+            - if the page needs vision extraction, convert it to b64 encoding, and add it as an image with a placeholder [according to the gemma 4 prompt format]
+
+            continue this step for all pages
+            """
+
+            base_system_prompt = str() # this will hold the instructions for the model
+            prompt_holder = str() # this will hold the data from all the pages
+
+            file_path = processed_document.file_path
+            processed_document_pages = processed_document.pages
+
+            # access each ProcessedPage object in the list
+            for processed_page in processed_document_pages:
+                # branch according to the extraction_method specified for the respective page
+                match processed_page.extraction_method:
+                    case "text":
+                        prompt_holder += "\n" + processed_page.raw_content
+                    case "vision":
+                        image_placeholder = f"""Image:
+                        {processed_page.image_b64_encoded}\n
+                        """
+                        prompt_holder += "\n" + image_placeholder
+
+        case ProcessedImage():
+            # this here is just an image uploaded by the user and we assume that there is no additional context provided by them
+            if processed_document.image_b64_encoded is not None:
+                # extract the b64 encodings
+                b64_image_bytes = processed_document.image_b64_encoded
+
+            else:
+                logger.error(f"ProcessedImageObject does not contain b64 encodings. Cannot proceed with vision extraction")
+                return
+        case _:
+            return "unknown type"
 
 def main():
     """The main function of the Document Parser agent
