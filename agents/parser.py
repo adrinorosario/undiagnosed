@@ -6,6 +6,21 @@ import base64
 import logging
 import io
 from PIL import Image
+import gc
+import os
+
+from transformers.utils import quantization_config
+
+# for the gemma model call
+import accelerate
+import transformers
+logger.info("accelerate:", accelerate.__version__)   # should be 1.x+
+logger.info("transformers:", transformers.__version__)
+
+from transformers import AutoProcessor, Gemma4ForConditionalGeneration
+from transformers import BitsAndBytesConfig # for quantization
+import torch
+import json
 
 # Configure module-level logger (adjust level as needed)
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +46,45 @@ raster_formats = {
 file_formats = {
     ".pdf", ".txt"
 }
+
+# model ids
+GEMMA4_E2B_MODEL_ID = os.getenv(
+    "GEMMA4_E2B_MODEL_ID",
+    "/kaggle/input/models/google/gemma-4/transformers/gemma-4-e2b-it/1"
+)
+GEMMA4_E4B_MODEL_ID = os.getenv(
+    "GEMMA4_E4B_MODEL_ID", 
+    "/kaggle/input/models/google/gemma-4/transformers/gemma-4-e4b-it/1"
+)
+
+# load the model
+def load_model(model_id: str, quantize: bool = False):
+    processor = AutoProcessor.from_pretrained(model_id)
+
+    if quantize:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
+
+        model = Gemma4ForConditionalGeneration.from_pretrained(
+            model_id,
+            quantization_config=quantization_config,
+            device_map="auto",
+        )
+
+    else:
+        model = Gemma4ForConditionalGeneration.from_pretrained(
+            model_id,
+            device_map="auto",
+            torch_dtype=torch.bfloat16
+        )
+
+    logger.info(f"Model loaded: {model_id}")
+    return model, processor
+
 
 # define data classes to store the contents of the processed document
 @dataclass
@@ -146,7 +200,7 @@ def document_validator(file_path: str) -> tuple[str, bool, str]:
     return (file_path, True, file_type)
 
 # a helper function to render a page as a b64 encoded byte string
-def render_page_to_b64(page: fz.page) -> str:
+def render_page_to_b64(page: fz.Page) -> str:
     """Renders a provided page as a b64 encoded string of bytes
 
     Args:
@@ -157,7 +211,7 @@ def render_page_to_b64(page: fz.page) -> str:
     """
     page_matrix = fz.Matrix(2, 2)
     page_pix = page.get_pixmap(matrix=page_matrix)
-    return image_encoder(pix.tobytes("png"))
+    return image_encoder(page_pix.tobytes("png"))
 
 def extraction_branching(validated_file_tuple: tuple):
     """Directs the control flow to the appropriate functions for extraction
@@ -356,6 +410,94 @@ def image_encoder(image_bytes: bytes) -> str:
             message=f"Exception occurred while trying to encode the image bytes: {err}"
         ) from err
 
+# Gemma 4's output is raw text. These two functions clean and validate it into a usable dict:
+# Strip markdown fences — models often wrap JSON in ```json ``` blocks.
+# Parse JSON — if this fails, attempt_json_recovery tries to close unclosed brackets caused by max_new_tokens truncation.
+# Key validation — any missing required keys (document_type, patient_context, lab_findings, imaging_findings, clinical_notes, flagged_signals, extraction_confidence) are filled with None rather than crashing.
+# Parse failure fallback — returns a skeleton dict with "extraction_confidence": "low" and the raw response attached for inspection.
+def validate_clinical_output(raw_response: str) -> dict:
+    """Parses and validates the raw JSON response from Gemma 4.
+
+    Args:
+        raw_response (str): The raw string output from the model
+
+    Returns:
+        dict: Validated clinical profile, or a partial result with error flag
+    """
+    cleaned = raw_response.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        # Attempt recovery — truncation leaves JSON unclosed
+        # Try to salvage whatever parsed cleanly before the cut
+        logger.warning("JSON parse failed — attempting truncation recovery")
+        cleaned = attempt_json_recovery(cleaned)
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError as e:
+            logger.error(f"Recovery failed: {e}")
+            return {
+                "document_type": "unknown",
+                "patient_context": None,
+                "lab_findings": [],
+                "imaging_findings": [],
+                "clinical_notes": [],
+                "flagged_signals": [],
+                "extraction_confidence": "low",
+                "parse_error": str(e),
+                "raw_response": raw_response
+            }
+
+    # validate keys...
+    required_keys = {
+        "document_type", "patient_context", "lab_findings",
+        "imaging_findings", "clinical_notes",
+        "flagged_signals", "extraction_confidence"
+    }
+    missing = required_keys - parsed.keys()
+    for key in missing:
+        parsed[key] = None
+    return parsed
+
+
+def attempt_json_recovery(broken_json: str) -> str:
+    """Attempts to close a truncated JSON string by balancing brackets.
+    
+    Args:
+        broken_json (str): The incomplete JSON string
+        
+    Returns:
+        str: A potentially valid JSON string with brackets closed
+    """
+    # Count unclosed structures
+    open_braces = broken_json.count('{') - broken_json.count('}')
+    open_brackets = broken_json.count('[') - broken_json.count(']')
+
+    # Strip trailing incomplete key-value pair — find last complete entry
+    # Truncation often leaves a dangling comma or partial string
+    last_complete = max(
+        broken_json.rfind('}'),
+        broken_json.rfind(']')
+    )
+    if last_complete != -1:
+        broken_json = broken_json[:last_complete + 1]
+
+    # Recount after trimming
+    open_braces = broken_json.count('{') - broken_json.count('}')
+    open_brackets = broken_json.count('[') - broken_json.count(']')
+
+    # Close in reverse order
+    broken_json += ']' * open_brackets
+    broken_json += '}' * open_braces
+
+    return broken_json
+
 def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedImage) -> dict:
     """Passes the extracted data into the Gemma models and returns a dict containing clinical signals/indicators
 
@@ -365,6 +507,52 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
     Returns:
         dict: A dict object (intended to be JSON) containing clinical signals
     """
+
+                # this will hold the instructions for the model
+    base_system_prompt = """You are a Medical Document Analyst specialising in extracting clinical signals from medical documents (medical reports, lab results, pathology documents, radiology notes). You understand that an ordinary individual who does not have knowledge of understanding or interpreting needs more than just guidance; they need to be able to understand what they are looking at, signals that might have been overlooked, and the long term implications of the report they hold. And for that, you need to first extract the clinical signals from the document(s), which is what you do. You help in identifying clinical signals such as elevated markers, abnormal findings, flagged terms, and extracting them from the document. These signals are required to build a clinical profile of the patient.
+
+    Extract key clinical signals from this medical document focusing on:
+        1. Lab test results (normal vs abnormal ranges)
+        2. Medication dosages (conversion units if needed)
+        3. Imaging findings (shape, location, contrast)
+        4. Patient demographics (age/gender/chat)
+        5. Diagnosis implications
+
+    Extract the clinical signals carefully with accuracy and precision. Construct a structured clinical profile of the patient using the extracted data, and provide the clinical profile as a single JSON object, following the provided JSON schema below strictly:
+    
+    {
+        "document_type": "lab_report | radiology | pathology | clinical_note | unknown",
+        "patient_context": {
+            "age": "number or null",
+            "sex": "string or null",
+            "stated_history": "string or null"
+        },
+        "lab_findings": [
+            {
+            "test_name": "string",
+            "value": "number or string",
+            "unit": "string or null",
+            "reference_range": "string or null",
+            "status": "normal | low | high | critical | unknown"
+            }
+        ],
+        "imaging_findings": [
+            {
+            "modality": "X-ray | MRI | CT | Ultrasound | other",
+            "region": "string",
+            "observation": "string"
+            }
+        ],
+        "clinical_notes": ["string"],
+        "flagged_signals": [
+            {
+            "signal": "string",
+            "reason": "string"
+            }
+        ],
+        "extraction_confidence": "high | medium | low"
+    }
+    """ 
 
     # check whether the input is an image or document list and branch accordingly
     match processed_document:
@@ -380,52 +568,6 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
 
             continue this step for all pages
             """
-
-            # this will hold the instructions for the model
-            base_system_prompt = """You are a Medical Document Analyst specialising in extracting clinical signals from medical documents (medical reports, lab results, pathology documents, radiology notes). You understand that an ordinary individual who does not have knowledge of understanding or interpreting needs more than just guidance; they need to be able to understand what they are looking at, signals that might have been overlooked, and the long term implications of the report they hold. And for that, you need to first extract the clinical signals from the document(s), which is what you do. You help in identifying clinical signals such as elevated markers, abnormal findings, flagged terms, and extracting them from the document. These signals are required to build a clinical profile of the patient.
-
-            Extract key clinical signals from this medical document focusing on:
-                1. Lab test results (normal vs abnormal ranges)
-                2. Medication dosages (conversion units if needed)
-                3. Imaging findings (shape, location, contrast)
-                4. Patient demographics (age/gender/chat)
-                5. Diagnosis implications
-
-            Extract the clinical signals carefully with accuracy and precision. Construct a structured clinical profile of the patient using the extracted data, and provide the clinical profile as a single JSON object, following the provided JSON schema below strictly:
-            
-            {
-                "document_type": "lab_report | radiology | pathology | clinical_note | unknown",
-                "patient_context": {
-                    "age": "number or null",
-                    "sex": "string or null",
-                    "stated_history": "string or null"
-                },
-                "lab_findings": [
-                    {
-                    "test_name": "string",
-                    "value": "number or string",
-                    "unit": "string or null",
-                    "reference_range": "string or null",
-                    "status": "normal | low | high | critical | unknown"
-                    }
-                ],
-                "imaging_findings": [
-                    {
-                    "modality": "X-ray | MRI | CT | Ultrasound | other",
-                    "region": "string",
-                    "observation": "string"
-                    }
-                ],
-                "clinical_notes": ["string"],
-                "flagged_signals": [
-                    {
-                    "signal": "string",
-                    "reason": "string"
-                    }
-                ],
-                "extraction_confidence": "high | medium | low"
-            }
-            """ 
 
             content_parts = [] # this will hold the data from all the pages
 
@@ -452,11 +594,20 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
                             "type": "image",
                             "image": processed_page.image_b64_encoded # handled by the processor
                         })
+
+            return content_parts
             
 
         case ProcessedImage():
             # this here is just an image uploaded by the user and we assume that there is no additional context provided by them
             if processed_document.image_b64_encoded is not None:
+
+                content_parts = [] # this will hold the content of the image(s)
+                content_parts.append({ # attach the system prompt
+                    "type": "text",
+                    "text": base_system_prompt
+                })
+
                 # extract the b64 encodings
                 b64_image_bytes = processed_document.image_b64_encoded
                 # add it to the list of contents
@@ -464,37 +615,132 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
                     "type": "image",
                     "image": b64_image_bytes
                 })
+
+                return content_parts
             else:
                 logger.error(f"ProcessedImageObject does not contain b64 encodings. Cannot proceed with vision extraction")
                 return
 
-        # here, you need to pass the content_parts to the gemma4 model call (to be implemented, need more clarity on how)
         case _:
             return "unknown type"
+
+
+def run_inference_for_clinical_signal_extraction(
+    model, 
+    processor,
+    data_source_directory: str,
+) -> dict:
+    """Runs the full document parsing and clinical signal extraction pipeline over a directory of medical files.
+
+    For each file in the directory, the function validates the file format, extracts content
+    (text or vision depending on page classification), constructs a multimodal prompt, runs
+    Gemma 4 inference, and validates the structured JSON output. GPU memory is flushed before
+    each file to prevent OOM errors on longer runs.
+
+    Args:
+        model: A loaded Gemma4ForConditionalGeneration instance.
+        processor: The corresponding AutoProcessor for the model.
+        data_source_directory (str): Path to the directory containing medical documents or images to process.
+
+    Returns:
+        dict: A mapping of file path strings to validated clinical profile dicts. Each dict follows
+        the schema defined in validate_clinical_output() — keys include document_type, patient_context,
+        lab_findings, imaging_findings, clinical_notes, flagged_signals, and extraction_confidence.
+        Files that fail validation or extraction are skipped and not included in the output.
+    """
+
+    # stores all the clinical signals
+    all_results = {}
+
+    directory_path = Path(data_source_directory)
+    for file_path in directory_path.iterdir():
+        if file_path.is_file():
+    
+            # start by performing the document validation
+            validation_tuple = document_validator(file_path)
+    
+            # pass the validation tuple to the extractor branching function
+            result = extraction_branching(validation_tuple)
+            # logger.info(f"Result: {result}")
+    
+            # call the clinical signals extraction function
+            if result is not None:
+                # empty the gpu memory before scanning this document
+                torch.cuda.empty_cache()
+                gc.collect()
+                
+                prompt_payload = extract_clinical_signals(result)
+                # logger.info(f"Clinical signals: {clinical_signals}")
+
+                # check if there are contents that are parsed and returned from the file
+                if not prompt_payload or prompt_payload == "unknown type":
+                    logger.error(f"No prompt payload generated for {file_path} — skipping")
+                    continue
+    
+                messages = [
+                    {
+                        "role": "user",
+                        "content": prompt_payload
+                    }
+                ]
+    
+                # apply chat template
+                inputs = processor.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt"
+                )
+
+                # move the inputs to the gpu(s)
+                inputs = {k: v.to("cuda:0") for k, v in inputs.items()}
+    
+                with torch.no_grad():
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=2048,
+                        do_sample=False, # keeps it deterministic without random sampling - needed for structured JSON output
+                        temperature=1.0 # even though ignored when sampling is false, needed for some versions
+                    )
+    
+                # decode only the newly generated tokens
+                # Use .shape[1] to get the integer value of the sequence length
+                input_length = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+                raw_response = processor.decode(
+                output_ids[0][input_length:],
+                skip_special_tokens=True
+                )
+    
+                logger.info(f"Raw model response: {raw_response}")
+                # print(validate_clinical_output(raw_response))
+
+                clinical_signals = validate_clinical_output(raw_response)
+                all_results[str(file_path)] = clinical_signals
+            logger.info("="*80, end="\n")
+
+    return all_results
+
 
 def main():
     """The main function of the Document Parser agent
     """
-    print("Document parser agent execution commenced...\n")
+    logger.info("Document parser agent execution commenced...\n")
+
+    # load the model and processor
+    model, processor = load_model(GEMMA4_E2B_MODEL_ID)
 
     # contains the testing documents
     testing_data_directory = Path("./test_data")
     
-    for file_path in testing_data_directory.iterdir():
-        if file_path.is_file():
+    results = run_inference_for_clinical_signal_extraction(
+        model,
+        processor,
+        testing_data_directory
+    )
 
-            # start by performing the document validation
-            validation_tuple = document_validator(file_path)
-
-            # pass the validation tuple to the extractor branching function
-            result = extraction_branching(validation_tuple)
-            # logger.info(f"Result: {result}")
-
-            # call the clinical signals extraction function
-            if result is not None:
-                clinical_signals = extract_clinical_signals(result)
-                logger.info(f"Clinical signals: {clinical_signals}")
-            print("-------\n")
+    for path, signals in results.items():
+        logger.info(f"{path}: {signals}")
 
 if __name__ == "__main__":
     main()
