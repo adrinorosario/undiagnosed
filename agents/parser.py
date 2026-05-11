@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, dataclass_transform
+from typing import Literal
 import fitz as fz
 from pathlib import Path
 import base64
@@ -145,6 +145,19 @@ def document_validator(file_path: str) -> tuple[str, bool, str]:
     # [CHANGED] Return as tuple for consistency with docstring
     return (file_path, True, file_type)
 
+# a helper function to render a page as a b64 encoded byte string
+def render_page_to_b64(page: fz.page) -> str:
+    """Renders a provided page as a b64 encoded string of bytes
+
+    Args:
+        page (fz.page): The page that needs to be encoded as an image
+
+    Returns:
+        str: b64 encoded byte string
+    """
+    page_matrix = fz.Matrix(2, 2)
+    page_pix = page.get_pixmap(matrix=page_matrix)
+    return image_encoder(pix.tobytes("png"))
 
 def extraction_branching(validated_file_tuple: tuple):
     """Directs the control flow to the appropriate functions for extraction
@@ -268,13 +281,13 @@ def extraction_branching(validated_file_tuple: tuple):
                 elif page_character_count < 50 or is_page_image_dominant or len(page_xobjects) >= len(page_fonts):
                     text_extraction_flagged_page_count.append(False)
 
-                    # convert the current page into an image and pass it into the b64 image encoder function
-                    page_matrix = fz.Matrix(2, 2)
-                    page_pix = page.get_pixmap(matrix=page_matrix)
+                    # # convert the current page into an image and pass it into the b64 image encoder function
+                    # page_matrix = fz.Matrix(2, 2)
+                    # page_pix = page.get_pixmap(matrix=page_matrix)
                     
-                    # retrieve the image bytes and pass it into the function
-                    page_image_bytes = page_pix.tobytes("png")
-                    b64_encoded_page_image = image_encoder(page_image_bytes)
+                    # # retrieve the image bytes and pass it into the function
+                    # page_image_bytes = page_pix.tobytes("png")
+                    b64_encoded_page_image = render_page_to_b64(page)
 
                     processed_page_image_data = ProcessedPage(
                         page_number = page.number,
@@ -287,13 +300,13 @@ def extraction_branching(validated_file_tuple: tuple):
                 else:
                     logger.warning(f"Page {page.number} is ambiguous (char_count={page_character_count}, font_count={len(page_fonts)}) - routing to vision")
                     text_extraction_flagged_page_count.append(False)
-                    # convert the current page into an image and pass it into the b64 image encoder function
-                    page_matrix = fz.Matrix(2, 2)
-                    page_pix = page.get_pixmap(matrix=page_matrix)
+                    # # convert the current page into an image and pass it into the b64 image encoder function
+                    # page_matrix = fz.Matrix(2, 2)
+                    # page_pix = page.get_pixmap(matrix=page_matrix)
                     
-                    # retrieve the image bytes and pass it into the function
-                    page_image_bytes = page_pix.tobytes("png")
-                    b64_encoded_page_image = image_encoder(page_image_bytes)
+                    # # retrieve the image bytes and pass it into the function
+                    # page_image_bytes = page_pix.tobytes("png")
+                    b64_encoded_page_image = render_page_to_b64(page)
 
                     processed_page_image_data = ProcessedPage(
                         page_number = page.number,
@@ -368,8 +381,59 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
             continue this step for all pages
             """
 
-            base_system_prompt = str() # this will hold the instructions for the model
-            prompt_holder = str() # this will hold the data from all the pages
+            # this will hold the instructions for the model
+            base_system_prompt = """You are a Medical Document Analyst specialising in extracting clinical signals from medical documents (medical reports, lab results, pathology documents, radiology notes). You understand that an ordinary individual who does not have knowledge of understanding or interpreting needs more than just guidance; they need to be able to understand what they are looking at, signals that might have been overlooked, and the long term implications of the report they hold. And for that, you need to first extract the clinical signals from the document(s), which is what you do. You help in identifying clinical signals such as elevated markers, abnormal findings, flagged terms, and extracting them from the document. These signals are required to build a clinical profile of the patient.
+
+            Extract key clinical signals from this medical document focusing on:
+                1. Lab test results (normal vs abnormal ranges)
+                2. Medication dosages (conversion units if needed)
+                3. Imaging findings (shape, location, contrast)
+                4. Patient demographics (age/gender/chat)
+                5. Diagnosis implications
+
+            Extract the clinical signals carefully with accuracy and precision. Construct a structured clinical profile of the patient using the extracted data, and provide the clinical profile as a single JSON object, following the provided JSON schema below strictly:
+            
+            {
+                "document_type": "lab_report | radiology | pathology | clinical_note | unknown",
+                "patient_context": {
+                    "age": "number or null",
+                    "sex": "string or null",
+                    "stated_history": "string or null"
+                },
+                "lab_findings": [
+                    {
+                    "test_name": "string",
+                    "value": "number or string",
+                    "unit": "string or null",
+                    "reference_range": "string or null",
+                    "status": "normal | low | high | critical | unknown"
+                    }
+                ],
+                "imaging_findings": [
+                    {
+                    "modality": "X-ray | MRI | CT | Ultrasound | other",
+                    "region": "string",
+                    "observation": "string"
+                    }
+                ],
+                "clinical_notes": ["string"],
+                "flagged_signals": [
+                    {
+                    "signal": "string",
+                    "reason": "string"
+                    }
+                ],
+                "extraction_confidence": "high | medium | low"
+            }
+            """ 
+
+            content_parts = [] # this will hold the data from all the pages
+
+            # attach the instructions for the model - the system prompt
+            content_parts.append({
+                "type": "text",
+                "text": base_system_prompt
+            })
 
             file_path = processed_document.file_path
             processed_document_pages = processed_document.pages
@@ -379,22 +443,32 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
                 # branch according to the extraction_method specified for the respective page
                 match processed_page.extraction_method:
                     case "text":
-                        prompt_holder += "\n" + processed_page.raw_content
+                        content_parts.append({
+                            "type": "text",
+                            "text": processed_page.raw_content
+                        })
                     case "vision":
-                        image_placeholder = f"""Image:
-                        {processed_page.image_b64_encoded}\n
-                        """
-                        prompt_holder += "\n" + image_placeholder
+                        content_parts.append({
+                            "type": "image",
+                            "image": processed_page.image_b64_encoded # handled by the processor
+                        })
+            
 
         case ProcessedImage():
             # this here is just an image uploaded by the user and we assume that there is no additional context provided by them
             if processed_document.image_b64_encoded is not None:
                 # extract the b64 encodings
                 b64_image_bytes = processed_document.image_b64_encoded
-
+                # add it to the list of contents
+                content_parts.append({
+                    "type": "image",
+                    "image": b64_image_bytes
+                })
             else:
                 logger.error(f"ProcessedImageObject does not contain b64 encodings. Cannot proceed with vision extraction")
                 return
+
+        # here, you need to pass the content_parts to the gemma4 model call (to be implemented, need more clarity on how)
         case _:
             return "unknown type"
 
@@ -414,7 +488,12 @@ def main():
 
             # pass the validation tuple to the extractor branching function
             result = extraction_branching(validation_tuple)
-            logger.info(f"Result: {result}")
+            # logger.info(f"Result: {result}")
+
+            # call the clinical signals extraction function
+            if result is not None:
+                clinical_signals = extract_clinical_signals(result)
+                logger.info(f"Clinical signals: {clinical_signals}")
             print("-------\n")
 
 if __name__ == "__main__":
