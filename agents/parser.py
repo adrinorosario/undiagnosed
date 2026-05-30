@@ -717,7 +717,8 @@ def run_inference_for_clinical_signal_extraction(
 
                 clinical_signals = validate_clinical_output(raw_response)
                 all_results[str(file_path)] = clinical_signals
-            logger.info("="*80, end="\n")
+            logger.info("="*80)
+            print()
 
     return all_results
 
