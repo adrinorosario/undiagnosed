@@ -2,6 +2,8 @@ from huggingface_hub import login
 import os
 import logging
 
+from transformers.utils import quantization_config
+
 import accelerate
 import transformers
 import torch
@@ -147,3 +149,104 @@ If you do not find any abnormal findings, do not force yourself to find or inven
 Return ONLY the JSON object. No preamble, introductory notes, explanation, or markdown code fences. The first character of your response should be the opening braces { of the JSON object, and the last character of your response should be the closing braces } of the JSON object.
 """
 
+# have the quantization config as a global variable
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True, 
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_quant_type="nf4"
+)
+
+def run_inference(
+    model_id: str,
+    device: str,
+    system_prompt: str,
+    payload_prompt: dict,
+    follow_up_prompt: str = None,
+    quantization_config: BitsAndBytesConfig = None
+) -> dict:
+    """_summary_
+
+    Args:
+        model_id (str): _description_
+        device (str): _description_
+        system_prompt (str): _description_
+        payload_prompt (dict): _description_
+        follow_up_prompt (str, optional): _description_. Defaults to None.
+        quantization_config (BitsAndBytesConfig, optional): _description_. Defaults to None.
+
+    Returns:
+        dict: _description_
+    """
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        quantization_config=quantization_config,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        device_map="auto",
+        attn_implementation="sdpa"
+    )
+
+    logger.info(f"Model loaded: {model_id}")
+    logger.info(f"Model device: {model.device}")
+    logger.info(f"Model hf_device_map: {model.hf_device_map}")
+
+    # construct the message structure 
+    messages =  [
+        {
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": single_call_system_prompt
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": json.dumps(payload_prompt, indent=2)
+            }]
+        }
+    ]
+
+    # apply the medgemma chat template
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    # tokenize the prompt and move it to the same device as the model
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt"
+    ).to(model.device)
+
+    # run the inference
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=6500, # a higher limit since the medgemma reasoning as a result of the thinking mode produces way more thinking tokens before producing the actual raw json
+            do_sample=True,
+            temperature=0.1, # keep it deterministic and strictly compliant to the provided json schema
+            top_p=0.95,
+            eos_token_id=tokenizer.eos_token_id
+        )
+
+    # decode the generated tokens, skip the system prompt
+    signal_analysis_output_tokens = outputs[0][inputs.input_ids.shape[-1]: ]
+    signal_analysis_response_text = tokenizer.decode(
+        signal_analysis_output_tokens,
+        skip_special_tokens=True
+    )
+
+    
+
+
+
+
+
+def main():
+    pass
