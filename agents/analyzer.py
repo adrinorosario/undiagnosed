@@ -277,7 +277,7 @@ def run_inference(
                     "text": json.dumps({ # need to pass both the jsons
                         "signal_analysis": validated_signal_analysis_object,
                         "clinical_profile": payload_prompt
-                    })
+                    }, indent=2)
                 }]
             }
         ]
