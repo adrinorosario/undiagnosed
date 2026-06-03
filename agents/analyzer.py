@@ -261,6 +261,64 @@ def run_inference(
         # enter the follow up reasoning pipeline
         logger.info("Low extraction_confidence, entering follow-up reasoning pipeline")
 
+        # create the message structure
+        follow_up_messages = [
+            {
+                "role": "system",
+                "content": [{
+                    "type": "text",
+                    "text": low_confidence_system_output_follow_up_prompt
+                }]
+            },
+            {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({ # need to pass both the jsons
+                        "signal_analysis": validated_signal_analysis_object,
+                        "clinical_profile": payload_prompt
+                    })
+                }]
+            }
+        ]
+
+        # apply chat template
+        prompt = tokenizer.apply_chat_template(
+            follow_up_messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        logger.info("created follow up critique prompt")
+
+        # tokenize and move to device
+        inputs = tokenizer(
+            prompt,
+            return_tensors="pt"
+        ).to(model.device)
+
+        # run inference
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=6500,
+                do_sample=True,
+                temperature=0.1,
+                top_p=0.95,
+                eos_token_id=tokenizer.eos_token_id
+            )
+
+        # decode the output
+        output_tokens = outputs[0][inputs.input_ids.shape[-1]: ]
+        response_text = tokenizer.decode(
+            output_tokens,
+            skip_special_tokens=True
+        )
+
+        # extract the json
+        extracted_final_json = validate_clinical_output(response_text)
+
+        logger.info("extracted the final json after follow up critique pipeline. returning it")
+        return extracted_final_json
 
 
 
