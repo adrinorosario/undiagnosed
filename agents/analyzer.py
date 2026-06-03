@@ -12,7 +12,7 @@ import json
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
 # import the helper functions
-from medgemma_signal_analysis_object_parser import validate_clinical_output
+from helper_functions.medgemma_signal_analysis_object_parser import validate_clinical_output
 
 
 logging.basicConfig(level=logging.INFO)
@@ -31,8 +31,8 @@ except HTTPError as herr:
 except GatedRepoError as gerr:
     logger.error("Gated repository. You do not have access to this model/dataset")
 
-logger.info("accelerate:", accelerate.__version__)   # should be 1.x+
-logger.info("transformers:", transformers.__version__)
+logger.info(f"accelerate: {accelerate.__version__}")   # should be 1.x+
+logger.info(f"transformers: {transformers.__version__}")
 
 
 single_call_system_prompt = """
