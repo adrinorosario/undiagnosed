@@ -11,6 +11,9 @@ import json
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
+# import the helper functions
+from medgemma_signal_analysis_object_parser import validate_clinical_output
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -217,14 +220,17 @@ def run_inference(
         tokenize=False,
         add_generation_prompt=True
     )
+    logger.info("Prompt created and chat template applied to the messages")
 
     # tokenize the prompt and move it to the same device as the model
     inputs = tokenizer(
         prompt,
         return_tensors="pt"
     ).to(model.device)
+    logger.info("Inputs tokenized and moved to the same device as the model's parameters")
 
     # run the inference
+    logger.info("STARTING MODEL INFERENCE")
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -234,6 +240,8 @@ def run_inference(
             top_p=0.95,
             eos_token_id=tokenizer.eos_token_id
         )
+    
+    logger.info("MODEL INFERENCE COMPLETE")
 
     # decode the generated tokens, skip the system prompt
     signal_analysis_output_tokens = outputs[0][inputs.input_ids.shape[-1]: ]
@@ -241,8 +249,17 @@ def run_inference(
         signal_analysis_output_tokens,
         skip_special_tokens=True
     )
+    logger.info("signal analysis object response decoded from raw response; removed system prompt")
 
-    
+    validated_signal_response_object = validate_clinical_output(signal_analysis_response_text)
+    logger.info("Validated signal analysis JSON and extracted JSON object")
+
+    if not payload_prompt["extraction_confidence"] == "low":
+        logger.info(f"Returning the signal analysis object since extraction_confidence is not low")
+        return validated_signal_response_object
+    elif payload_prompt["extraction_confidence"] == "low":
+        # enter the follow up reasoning pipeline
+        logger.info("Low extraction_confidence, entering follow-up reasoning pipeline")
 
 
 

@@ -1,4 +1,8 @@
 import logging
+import json
+
+# import the json recovery function
+from medgemma_response_json_recoverer import attempt_json_recovery
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
