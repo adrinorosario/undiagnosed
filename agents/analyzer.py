@@ -162,8 +162,8 @@ quantization_config = BitsAndBytesConfig(
 
 def run_inference(
     model_id: str,
-    device: str,
-    system_prompt: str,
+    device: str, # figure out how this will look when you have it deployed in production
+    system_prompt: str, # the standard pass prompt
     payload_prompt: dict,
     follow_up_prompt: str = None,
     quantization_config: BitsAndBytesConfig = None
@@ -320,7 +320,12 @@ def run_inference(
         logger.info("extracted the final json after follow up critique pipeline. returning it")
         return extracted_final_json
 
+# now after the final extracted json, how will this actually be passed overr?
+# the extracted json object (the signal analysis object) needs to be passed over
+# with the clinical profile object. along with this, the full documents also need to be 
+# passed over to agent 3
 
+# need to add the docstrings to all the functions in this script
 
 
 def main():
