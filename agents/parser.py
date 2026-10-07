@@ -75,7 +75,7 @@ def load_model(model_id: str, quantize: bool = False):
             quantization_config=quantization_config,
             device_map="auto",
             local_files_only=True,
-        )
+        ).to("mps")
 
     else:
         model = AutoModelForMultimodalLM.from_pretrained(
@@ -83,7 +83,7 @@ def load_model(model_id: str, quantize: bool = False):
             device_map="auto",
             torch_dtype=torch.bfloat16,
             local_files_only=True,
-        )
+        ).to("mps")
 
     logger.info(f"Local Model loaded: {model_id}")
     return model, processor
@@ -697,7 +697,7 @@ def run_inference_for_clinical_signal_extraction(
                 )
 
                 # move the inputs to the gpu(s)
-                inputs = {k: v.to("cuda:0") for k, v in inputs.items()}
+                inputs = {k: v.to(model.device) for k, v in inputs.items()}
     
                 with torch.no_grad():
                     output_ids = model.generate(
