@@ -19,8 +19,8 @@ import transformers
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info("accelerate:", accelerate.__version__)   # should be 1.x+
-logger.info("transformers:", transformers.__version__)
+logger.info("accelerate: %s", accelerate.__version__)   # should be 1.x+
+logger.info("transformers: %s", transformers.__version__)
 
 from transformers import (
     AutoProcessor,
