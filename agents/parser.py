@@ -73,14 +73,14 @@ def load_model(model_id: str, quantize: bool = False):
         model = AutoModelForMultimodalLM.from_pretrained(
             model_id,
             quantization_config=quantization_config,
-            device_map="auto",
+            device_map={"": "mps"}, # offload everything to mps
             local_files_only=True,
         ).to("mps")
 
     else:
         model = AutoModelForMultimodalLM.from_pretrained(
             model_id,
-            device_map="auto",
+            device_map={"": "mps"}, # offload everything to mps
             torch_dtype=torch.bfloat16,
             local_files_only=True,
         ).to("mps")
