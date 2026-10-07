@@ -729,10 +729,10 @@ def main():
     logger.info("Document parser agent execution commenced...\n")
 
     # load the model and processor
-    model, processor = load_model(GEMMA4_E2B_MODEL_ID)
+    model, processor = load_model("../models/qwen3.5-4b")
 
     # contains the testing documents
-    testing_data_directory = Path("./test_data")
+    testing_data_directory = Path("../test_documents")
     
     results = run_inference_for_clinical_signal_extraction(
         model,
