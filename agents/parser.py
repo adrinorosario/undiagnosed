@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
 import fitz as fz
+import pymupdf as pyd
 from pathlib import Path
 import base64
 import logging
@@ -14,6 +15,10 @@ from transformers.utils import quantization_config
 # for the gemma model call
 import accelerate
 import transformers
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 logger.info("accelerate:", accelerate.__version__)   # should be 1.x+
 logger.info("transformers:", transformers.__version__)
 
