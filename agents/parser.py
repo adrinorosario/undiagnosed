@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 logger.info("accelerate:", accelerate.__version__)   # should be 1.x+
 logger.info("transformers:", transformers.__version__)
 
-from transformers import AutoProcessor, Gemma4ForConditionalGeneration
+from transformers import (
+    AutoProcessor,
+    AutoModelForMultimodalLM,
+)
 from transformers import BitsAndBytesConfig # for quantization
 import torch
 import json
@@ -52,19 +55,12 @@ file_formats = {
     ".pdf", ".txt"
 }
 
-# model ids
-GEMMA4_E2B_MODEL_ID = os.getenv(
-    "GEMMA4_E2B_MODEL_ID",
-    "/kaggle/input/models/google/gemma-4/transformers/gemma-4-e2b-it/1"
-)
-GEMMA4_E4B_MODEL_ID = os.getenv(
-    "GEMMA4_E4B_MODEL_ID", 
-    "/kaggle/input/models/google/gemma-4/transformers/gemma-4-e4b-it/1"
-)
-
 # load the model
 def load_model(model_id: str, quantize: bool = False):
-    processor = AutoProcessor.from_pretrained(model_id)
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        local_files_only=True, # load the local model files
+    )
 
     if quantize:
         quantization_config = BitsAndBytesConfig(
@@ -74,20 +70,22 @@ def load_model(model_id: str, quantize: bool = False):
             bnb_4bit_quant_type="nf4"
         )
 
-        model = Gemma4ForConditionalGeneration.from_pretrained(
+        model = AutoModelForMultimodalLM.from_pretrained(
             model_id,
             quantization_config=quantization_config,
             device_map="auto",
+            local_files_only=True,
         )
 
     else:
-        model = Gemma4ForConditionalGeneration.from_pretrained(
+        model = AutoModelForMultimodalLM.from_pretrained(
             model_id,
             device_map="auto",
-            torch_dtype=torch.bfloat16
+            torch_dtype=torch.bfloat16,
+            local_files_only=True,
         )
 
-    logger.info(f"Model loaded: {model_id}")
+    logger.info(f"Local Model loaded: {model_id}")
     return model, processor
 
 
@@ -639,11 +637,11 @@ def run_inference_for_clinical_signal_extraction(
 
     For each file in the directory, the function validates the file format, extracts content
     (text or vision depending on page classification), constructs a multimodal prompt, runs
-    Gemma 4 inference, and validates the structured JSON output. GPU memory is flushed before
+    inference, and validates the structured JSON output. GPU memory is flushed before
     each file to prevent OOM errors on longer runs.
 
     Args:
-        model: A loaded Gemma4ForConditionalGeneration instance.
+        model: A loaded instance.
         processor: The corresponding AutoProcessor for the model.
         data_source_directory (str): Path to the directory containing medical documents or images to process.
 
