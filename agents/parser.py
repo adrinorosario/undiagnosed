@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Literal
-import fitz as fz
+# import fitz as fz
 import pymupdf as pyd
 from pathlib import Path
 import base64
@@ -15,6 +15,7 @@ from transformers.utils import quantization_config
 # for the gemma model call
 import accelerate
 import transformers
+from transformers import TextStreamer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -203,16 +204,16 @@ def document_validator(file_path: str) -> tuple[str, bool, str]:
     return (file_path, True, file_type)
 
 # a helper function to render a page as a b64 encoded byte string
-def render_page_to_b64(page: fz.Page) -> str:
+def render_page_to_b64(page: pyd.Page) -> str:
     """Renders a provided page as a b64 encoded string of bytes
 
     Args:
-        page (fz.page): The page that needs to be encoded as an image
+        page (pyd.page): The page that needs to be encoded as an image
 
     Returns:
         str: b64 encoded byte string
     """
-    page_matrix = fz.Matrix(2, 2)
+    page_matrix = pyd.Matrix(2, 2)
     page_pix = page.get_pixmap(matrix=page_matrix)
     return image_encoder(page_pix.tobytes("png"))
 
@@ -265,7 +266,7 @@ def extraction_branching(validated_file_tuple: tuple):
             # documents need to be further processed for extraction
             # print(f"Document: {file_path}")
             logger.info(f"Document: {file_path}")
-            document = fz.open(filename=Path(file_path))
+            document = pyd.open(filename=Path(file_path))
 
             """How the document will be flagged as scanned or not:
                 - get the total count of page fonts
@@ -339,7 +340,7 @@ def extraction_branching(validated_file_tuple: tuple):
                     text_extraction_flagged_page_count.append(False)
 
                     # # convert the current page into an image and pass it into the b64 image encoder function
-                    # page_matrix = fz.Matrix(2, 2)
+                    # page_matrix = pyd.Matrix(2, 2)
                     # page_pix = page.get_pixmap(matrix=page_matrix)
                     
                     # # retrieve the image bytes and pass it into the function
@@ -358,7 +359,7 @@ def extraction_branching(validated_file_tuple: tuple):
                     logger.warning(f"Page {page.number} is ambiguous (char_count={page_character_count}, font_count={len(page_fonts)}) - routing to vision")
                     text_extraction_flagged_page_count.append(False)
                     # # convert the current page into an image and pass it into the b64 image encoder function
-                    # page_matrix = fz.Matrix(2, 2)
+                    # page_matrix = pyd.Matrix(2, 2)
                     # page_pix = page.get_pixmap(matrix=page_matrix)
                     
                     # # retrieve the image bytes and pass it into the function
@@ -413,13 +414,13 @@ def image_encoder(image_bytes: bytes) -> str:
             message=f"Exception occurred while trying to encode the image bytes: {err}"
         ) from err
 
-# Gemma 4's output is raw text. These two functions clean and validate it into a usable dict:
+
 # Strip markdown fences — models often wrap JSON in ```json ``` blocks.
 # Parse JSON — if this fails, attempt_json_recovery tries to close unclosed brackets caused by max_new_tokens truncation.
 # Key validation — any missing required keys (document_type, patient_context, lab_findings, imaging_findings, clinical_notes, flagged_signals, extraction_confidence) are filled with None rather than crashing.
 # Parse failure fallback — returns a skeleton dict with "extraction_confidence": "low" and the raw response attached for inspection.
 def validate_clinical_output(raw_response: str) -> dict:
-    """Parses and validates the raw JSON response from Gemma 4.
+    """Parses and validates the raw JSON response
 
     Args:
         raw_response (str): The raw string output from the model
@@ -428,11 +429,16 @@ def validate_clinical_output(raw_response: str) -> dict:
         dict: Validated clinical profile, or a partial result with error flag
     """
     cleaned = raw_response.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("```")[1]
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:]
-        cleaned = cleaned.strip()
+    if "</think>" in cleaned:
+        cleaned = cleaned.split("</think>", 1)[1].strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+    # if cleaned.startswith("```"):
+    #     cleaned = cleaned.split("```")[1]
+    #     if cleaned.startswith("json"):
+    #         cleaned = cleaned[4:]
+    #     cleaned = cleaned.strip()
 
     try:
         parsed = json.loads(cleaned)
@@ -512,7 +518,14 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
     """
 
                 # this will hold the instructions for the model
-    base_system_prompt = """You are a Medical Document Analyst specialising in extracting clinical signals from medical documents (medical reports, lab results, pathology documents, radiology notes). You understand that an ordinary individual who does not have knowledge of understanding or interpreting needs more than just guidance; they need to be able to understand what they are looking at, signals that might have been overlooked, and the long term implications of the report they hold. And for that, you need to first extract the clinical signals from the document(s), which is what you do. You help in identifying clinical signals such as elevated markers, abnormal findings, flagged terms, and extracting them from the document. These signals are required to build a clinical profile of the patient.
+    base_system_prompt = """You are a Medical Document Analyst specialising in extracting clinical signals from
+    medical documents (medical reports, lab results, pathology documents, radiology notes). 
+    You understand that an ordinary individual who does not have knowledge of understanding or interpreting 
+    needs more than just guidance; they need to be able to understand what they are looking at, signals that might 
+    have been overlooked, and the long term implications of the report they hold. And for that, you need to first 
+    extract the clinical signals from the document(s), which is what you do. You help in identifying clinical signals 
+    such as elevated markers, abnormal findings, flagged terms, and extracting them from the document. These signals 
+    are required to build a clinical profile of the patient.
 
     Extract key clinical signals from this medical document focusing on:
         1. Lab test results (normal vs abnormal ranges)
@@ -521,7 +534,9 @@ def extract_clinical_signals(processed_document: ProcessedDocument | ProcessedIm
         4. Patient demographics (age/gender/chat)
         5. Diagnosis implications
 
-    Extract the clinical signals carefully with accuracy and precision. Construct a structured clinical profile of the patient using the extracted data, and provide the clinical profile as a single JSON object, following the provided JSON schema below strictly:
+    Extract the clinical signals carefully with accuracy and precision. Construct a structured clinical profile of 
+    the patient using the extracted data, and provide the clinical profile as a single JSON object -- without any additional text
+    or markdown formatting -- following the provided JSON schema below strictly:
     
     {
         "document_type": "lab_report | radiology | pathology | clinical_note | unknown",
@@ -693,23 +708,36 @@ def run_inference_for_clinical_signal_extraction(
                     add_generation_prompt=True,
                     tokenize=True,
                     return_dict=True,
-                    return_tensors="pt"
+                    return_tensors="pt",
+                    enable_thinking=False, # skips reasoning steps in the model
                 )
 
                 # move the inputs to the gpu(s)
                 inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+                # initialise the textstreamer
+                text_streamer = TextStreamer(
+                    processor.tokenizer,
+                    skip_prompt=True,
+                )
     
                 with torch.no_grad():
                     output_ids = model.generate(
                         **inputs,
-                        max_new_tokens=2048,
+                        max_new_tokens=1024, # set lower to reduce latency compared to 2048
                         do_sample=False, # keeps it deterministic without random sampling - needed for structured JSON output
+                        streamer=text_streamer,
                         temperature=1.0 # even though ignored when sampling is false, needed for some versions
                     )
     
                 # decode only the newly generated tokens
                 # Use .shape[1] to get the integer value of the sequence length
                 input_length = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+
+                generated = output_ids[0][input_length:]
+                truncated = generated.shape[0] >= 1024          # use the same value as max_new_tokens
+                logger.info("Generated %d tokens (truncated=%s)", generated.shape[0], truncated)
+                
                 raw_response = processor.decode(
                 output_ids[0][input_length:],
                 skip_special_tokens=True
@@ -731,16 +759,19 @@ def main():
     """
     logger.info("Document parser agent execution commenced...\n")
 
+    ROOT = Path(__file__).resolve().parent.parent
+
     # load the model and processor
-    model, processor = load_model("../models/qwen3.5-4b")
+    model, processor = load_model(str(ROOT / "models" / "medgemma1_4-4b_it"))
 
     # contains the testing documents
-    testing_data_directory = Path("../test_documents")
+    # testing_data_directory = ROOT / "test_documents"
+    test_file="../test_documents/jcm-12-05967.pdf"
     
     results = run_inference_for_clinical_signal_extraction(
         model,
         processor,
-        testing_data_directory
+        test_file
     )
 
     for path, signals in results.items():
